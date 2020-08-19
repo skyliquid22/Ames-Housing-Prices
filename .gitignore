@@ -1,0 +1,27 @@
+#Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+#Misc R files
+.RData
+.Rhistory
+
+#Data
+#can be downloaded from kaggle
+data/
+
+#Predictions
+#I don't need to share my predictions publicly
+PythonPreds/
+Preds/
+
+#Unwanted notebooks
+Untitled.ipynb
+Untitled1.ipynb
+
+#Python files for requirements.txt
+Python_for_Reqs/
+
+#Test files
+my_funcs.py
+my_funcs.ipynb
+__pycache__/
