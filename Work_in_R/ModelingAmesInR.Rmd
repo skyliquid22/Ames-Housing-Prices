@@ -1,0 +1,301 @@
+---
+title: "Ames"
+author: "AE"
+date: "10/31/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Ames Housing Data
+
+### Libraries
+```{r Libs}
+library(readr)
+library(lubridate)
+library(VSURF)
+library(car)
+library(MASS)
+library(randomForest)
+library(dplyr)
+library(tidyr)
+library(e1071)
+```
+
+### Functions
+```{r Funcs}
+convertFactors <- function(data, ordered = NULL){
+  cns <- colnames(data)
+  facs <- cns[sapply(data, is.character)]
+  for(i in facs){
+    if(i %in% ordered){
+      data[[i]] <- as.ordered(data[[i]])
+    }
+    else{
+      data[[i]] <- as.factor(data[[i]])
+    }
+  }
+  return(data)
+}
+```
+
+### Data Import
+```{r Data}
+train <- as.data.frame(read_csv("data/train.csv"))
+
+test <- as.data.frame(read_csv("data/test.csv"))
+```
+
+### Correlation
+```{r Corr}
+
+cormat <- round(cor(train[, sapply(train,is.numeric)], use="pairwise.complete.obs"),4)
+
+Upper.cormat <- train[, sapply(train,is.numeric)] %>%
+  corrr::correlate() %>%
+  corrr::rearrange(method = "MDS", absolute = FALSE) %>%
+  corrr::shave() %>%
+  corrr::rplot(shape = 19, colors = c("red", "green"))
+Upper.cormat
+
+Upper.cormat %>%
+  ggplot2::ggsave(filename = "Upper.Corplot.NumVars.png",
+                  width = 10, height = 15)
+
+```
+
+### Data Treatment
+```{r DataTreat}
+#Matching Levels
+train$isTrain <- rep(1, nrow(train))
+test$isTrain <- rep(0, nrow(test))
+test$SalePrice <- rep(0, nrow(test))
+fullset <- rbind(train, test)
+
+#Dropping Variables with High Pairwise Correlations (and frequently very little impact on SalePrice), redundant variables, variables which show no relationship with SalePrice, or those variables with high percentages of shared values
+fullset$MasVnrArea <- NULL
+fullset$MasVnrType <- NULL
+fullset$GarageYrBlt <- NULL
+fullset$BsmtFinSF2 <- NULL
+fullset$BsmtFinType2 <- NULL
+fullset$BsmtHalfBath <- NULL
+fullset$TotalBsmtSF <- NULL
+fullset$BsmtExposure <- NULL
+fullset$GarageArea <-NULL
+fullset$GarageFinish <- NULL
+fullset$GarageCond <- NULL
+fullset$GarageQual <- NULL
+fullset$BsmtUnfSF <- NULL
+fullset$BsmtFinSF1 <- NULL
+fullset$BsmtCond <- NULL
+fullset$Exterior1st <- NULL
+fullset$Exterior2nd <- NULL
+fullset$PoolArea <- NULL
+fullset$ExterCond <- NULL
+fullset$MoSold <- NULL
+fullset$YrSold <- NULL
+fullset$LowQualFinSF <- NULL
+
+
+#Handling NA's
+  #Deleting those variables found to be more than 15% Missing
+fullset$PoolQC <- NULL
+fullset$Alley <- NULL
+fullset$MiscFeature <- NULL
+fullset$Fence <- NULL
+fullset$FireplaceQu <- NULL
+fullset$LotFrontage <- NULL
+
+fullset <- fullset[!is.na(fullset$Electrical),]
+
+#Imputing NA's
+fullset <- 
+  replace_na(fullset,
+             list(
+               MSZoning = "RL",
+               Utilities = "AllPub",
+               BsmtQual = "None",
+               BsmtFinType1 = "None",
+               BsmtFullBath = 0,
+               KitchenQual = "TA",
+               Functional = "Typ",
+               GarageType = "None",
+               GarageCars = 1, #Mode Imput
+               SaleType = "Oth"))
+
+                 #ordered = c("ExterQual","BsmtQual","BsmtFinType1","HeatingQC","KitchenQual","PavedDrive","GarageType","Functional"))
+
+#Converting Numeric categorical vars to factors
+fullset$MSSubClass <-
+  as.factor(fullset$MSSubClass)
+#Ordered Factors
+fullset$ExterQual <- 
+  factor(fullset$ExterQual, 
+             levels = c("Po", "Fa", "TA",
+                        "Gd", "Ex"),
+         ordered = TRUE)
+fullset$BsmtQual <-
+  factor(fullset$BsmtQual, 
+             levels = c("None", "Po", "Fa",
+                        "TA", "Gd", "Ex"),
+            ordered = TRUE)
+fullset$BsmtFinType1 <- 
+  factor(fullset$BsmtFinType1,
+              levels = c("None", "Unf", 
+                         "LwQ", "Rec", 
+                         "BLQ", "ALQ", 
+                         "GLQ"),
+         ordered = TRUE)
+fullset$HeatingQC <- 
+  factor(fullset$HeatingQC,
+             levels = c("Po", "Fa", "TA", 
+                        "Gd", "Ex"),
+         ordered = TRUE)
+fullset$KitchenQual <-
+  factor(fullset$KitchenQual,
+             levels = c("Po", "Fa", "TA",
+                        "Gd", "Ex"),
+             ordered = TRUE)
+fullset$PavedDrive <-
+  factor(fullset$PavedDrive,
+             levels = c("N", "P", "Y"),
+         ordered = TRUE)
+fullset$Functional <-
+  factor(fullset$Functional, 
+             levels = c("Sal", "Sev", 
+                        "Maj2", "Maj1", 
+                        "Mod", "Min2", 
+                        "Min1", "Typ"),
+         ordered = TRUE)
+fullset$OverallCond <- 
+  as.ordered(fullset$OverallCond)
+fullset$OverallQual <- 
+  as.ordered(fullset$OverallQual)
+
+
+
+#Seperating the Train and Test Sets
+train <- fullset[fullset$isTrain == 1,]
+test <- fullset[fullset$isTrain ==0,]
+
+#Removing Outlier found in python
+train <- train[!(train$GrLivArea > 4000),]
+```
+
+
+### Scaling
+```{r Scale}
+#Preserving and Unscaled copy of Train and Test
+train_unscal <- train
+test_unscal <- test
+
+#Standard Scaling of Numeric Variables
+vars_to_scale <- c("LotArea",
+                   "1stFlrSF",
+                   "2ndFlrSF",
+                   "GrLivArea",
+                   "WoodDeckSF",
+                   "OpenPorchSF",
+                   "EnclosedPorch",
+                   "3SsnPorch",
+                   "ScreenPorch")
+
+#Scaling of Test and Train
+for(i in vars_to_scale){
+  train[[i]] <- scale(train[[i]])
+  test[[i]] <- scale(test[[i]])
+}
+```
+
+### Log Transformations
+Let review the probability plots of some of the (unscale) numeric variables, to see if they would benefit from a log transformation.
+
+```{r LogT}
+#SalePrice - Yes
+layout(matrix(c(1,2), 1, 2))
+probplot(train$SalePrice)
+probplot(log(train$SalePrice))
+#Lot Area - No
+layout(matrix(c(1,2), 1, 2))
+probplot(train$LotArea)
+probplot(log(train$LotArea))
+#1stFlrSQF - Yes
+layout(matrix(c(1,2), 1, 2))
+probplot(train$`1stFlrSF`)
+probplot(log(train$`1stFlrSF`))
+#2ndFlrSqF - No
+layout(matrix(c(1,2), 1, 2))
+probplot(train[(train$`2ndFlrSF` > 0),]$`2ndFlrSF`)
+probplot(log(train[(train$`2ndFlrSF` > 0),]$`2ndFlrSF`))
+#LowQualSqrF - Yes
+layout(matrix(c(1,2), 1, 2))
+probplot(train$GrLivArea)
+probplot(log(train$GrLivArea))
+#WoodDeckSF - Yes, but would need to handle the 0 values...
+layout(matrix(c(1,2), 1, 2))
+probplot(train[train$WoodDeckSF > 0,]$WoodDeckSF)
+probplot(log(train[train$WoodDeckSF >0,]$WoodDeckSF))
+#OpenPorch
+```
+
+## Feature Extraction/Creation
+
+
+## Random Forest Model
+```{r RF}
+tuneRF(x = train[,-c(1, 54, 55)],
+       y = train$SalePrice,
+       ntreeTry = 300,
+       stepFactor = 1.5)
+
+rf.tuned.1 <- randomForest(x = 
+          train[,-c(1, 54, 55)],
+          y = train$SalePrice,
+          mtry = 14,
+          ntree = 500)
+preds <- 
+  predict(rf.tuned.1,
+          newdata = test[,-c(1, 54, 55)],
+          ntrees = 500,
+          mtry = 32)
+
+preds.out <- 
+  as.data.frame(cbind(test$Id, preds))
+colnames(preds.out) <- c("Id", "SalePrice")
+write_csv(preds.out, "Preds/pred_6.csv")
+
+rf.1 <- randomForest(x = 
+          train[,-c(1, 54, 55)],
+          y = train$SalePrice,
+          ntree = 2000, #stabilizes var imp
+          mrty = 14,
+          importance = TRUE)
+#VarImp
+imp <- as.data.frame(caret::varImp(rf.1))
+imp <- 
+  data.frame(Overall = imp$Overall,
+             names = rownames(imp))
+imp[order(imp$Overall, decreasing = TRUE),]
+
+
+```
+
+## VSURF Model
+```{r VSURF}
+vsurf.1 <- 
+  VSURF(x = train[,-c(1, 54, 55)],
+        y = train$SalePrice) 
+
+preds <- 
+  predict(vsurf.1,
+          newdata = test[,-c(1, 54, 55)])
+
+preds.out <- 
+  as.data.frame(cbind(test$Id, preds$pred))
+
+colnames(preds.out) <- c("Id", "SalePrice")
+write_csv(preds.out, "Preds/pred_8.csv")
+```
